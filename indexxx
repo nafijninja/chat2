@@ -1,0 +1,112 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log("MongoDB Connected"))
+  .catch(err => console.error("MongoDB Connection Error: ", err));
+
+// MongoDB Schema for Messages
+const messageSchema = new mongoose.Schema({
+  user: String,
+  text: String,
+  fileUrl: String,
+  fileName: String,
+  reaction: String,
+  timestamp: { type: Date, default: Date.now }
+});
+const Message = mongoose.model('Message', messageSchema);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('uploads'));
+
+// File Upload Configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = 'uploads/';
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath);
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
+});
+const upload = multer({ storage });
+
+// API to Fetch Messages
+app.get('/messages', async (req, res) => {
+  try {
+    const messages = await Message.find().sort({ timestamp: 1 });
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// File Upload Endpoint
+app.post('/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  const fileData = {
+    user: req.body.user || "Anonymous",
+    fileUrl: `/${req.file.filename}`,
+    fileName: req.file.originalname
+  };
+  const newMessage = new Message(fileData);
+  await newMessage.save();
+  io.emit('file message', fileData);
+  res.json(fileData);
+});
+
+// WebSocket Connection
+io.on('connection', (socket) => {
+  console.log('A user connected');
+
+  socket.on('set username', (username) => {
+    socket.username = username || 'Anonymous';
+  });
+
+  socket.on('chat message', async (msg) => {
+    const messageData = { user: socket.username, text: msg.text };
+    const newMessage = new Message(messageData);
+    await newMessage.save();
+    io.emit('chat message', messageData);
+  });
+
+  socket.on('chat reaction', async (reactionData) => {
+    const reactionMessage = { user: socket.username, reaction: reactionData.reaction };
+    const newMessage = new Message(reactionMessage);
+    await newMessage.save();
+    io.emit('chat reaction', reactionMessage);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('A user disconnected');
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
